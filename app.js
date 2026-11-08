@@ -4,9 +4,10 @@
 const LS = { vault: 'fin.vault', dev: 'fin.device' };
 const ITER = 600000, FILE = 'data.enc';
 const LISTS = ['tx', 'bookings', 'accounts', 'recurring', 'planned'], SINGLE = ['settings', 'house'];
-const AREAS = { personale: 'Personale', bnb: 'Casa vacanze', humfiverse: 'Humfiverse' };
+const AREAS = { personale: 'Personale', bnb: 'Casa vacanze', humfiverse: 'Humfiverse', cyberstand: 'Cyberstand' };
 const CATS = {
-  personale: { out: ['Casa e bollette', 'Spesa', 'Trasporti', 'Salute', 'Svago', 'Abbonamenti', 'Viaggi', 'Altro'], in: ['Stipendio', 'Rimborsi', 'Altro'] },
+  personale: { out: ['Casa e bollette', 'Spesa', 'Trasporti', 'Salute', 'Svago', 'Abbonamenti', 'Viaggi', 'Tasse e imposte', 'Altro'], in: ['Stipendio', 'Rimborsi', 'Altro'] },
+  cyberstand: { out: ['Viaggi', 'Software', 'Altro'], in: ['Compenso', 'Altro'] },
   bnb: { out: ['Pulizie', 'Lavanderia', 'Utenze', 'Manutenzione', 'Forniture', 'Arredo', 'Tasse e imposte', 'Ritenute portali', 'Commercialista', 'Altro'], in: ['Affitto diretto', 'Altro'] },
   humfiverse: { out: ['Costituzione società', 'Legale', 'Contabilità', 'Hosting e software', 'Audit', 'Marketing', 'Viaggi', 'Altro'], in: ['Commissioni piattaforma', 'Finanziamenti', 'Altro'] },
 };
@@ -141,9 +142,9 @@ function setSync(t) { UI.sync = t; const el = $('#syncState'); if (el) el.textCo
 
 /* ---------- calcoli ---------- */
 function flows() {
-  const a = live('tx').map(t => ({ d: t.d, amt: t.amt, kind: t.kind, area: t.area, cat: t.cat }));
-  /* Le prenotazioni future non sono ancora incassi. */
+  /* Movimenti e prenotazioni con data futura sono previsioni, non cassa. */
   const now = today();
+  const a = live('tx').filter(t => t.d <= now).map(t => ({ d: t.d, amt: t.amt, kind: t.kind, area: t.area, cat: t.cat }));
   for (const b of live('bookings')) if (b.depart <= now) a.push({ d: b.depart, amt: b.net, kind: 'in', area: 'bnb', cat: 'Prenotazioni' });
   return a;
 }
@@ -185,7 +186,8 @@ function bnbMonthlyAvg() {
 }
 function salaryMonthly() { return D.settings.netAnnual / 12; }
 function plannedOut() {
-  return live('recurring').filter(r => r.kind === 'out').reduce((s, r) => s + monthlyEq(r), 0) +
+  /* Le spese di casa vacanze sono già nella media netta del B&B. */
+  return live('recurring').filter(r => r.kind === 'out' && r.area === 'personale').reduce((s, r) => s + monthlyEq(r), 0) +
     Object.values(D.settings.budgets).reduce((s, v) => s + num(v), 0);
 }
 function monthlySaving() {
@@ -250,8 +252,15 @@ function vHome() {
   <section class="card"><h2>Ultimi 12 mesi</h2><div class="legend"><span><i style="background:var(--s1)"></i>Entrate</span><span><i style="background:var(--s2)"></i>Uscite</span></div><div class="chart" id="chart"></div>${chartTable()}</section>
   <section class="card"><h2>Anno ${y} per attività</h2><div class="tw"><table><thead><tr><th>Attività</th><th class="r">Entrate</th><th class="r">Uscite</th><th class="r">Saldo</th></tr></thead><tbody>${areas}</tbody></table></div>
   <p class="small mut" style="margin-top:10px">Da accantonare per la casa vacanze nel ${y}: ${eur(Math.max(0, b.tot.tax - b.tot.withheld))} di cedolare stimata al netto delle ritenute dei portali e ${eur(b.tot.cityTax)} di imposta di soggiorno.</p></section>
+  ${expectedCard()}
   <section class="card"><h2>Comprare casa</h2><p class="num" style="font-size:1.25rem;font-weight:650;margin-bottom:2px">${eur(hc.ceiling)}</p><p class="mut small">prezzo massimo che il reddito sostiene con le impostazioni attuali. Con la liquidità di oggi arrivi a ${eur(hc.today)}.</p><button class="btn alt sm" data-act="go" data-v="house">Apri il simulatore</button></section>
   ${budgets ? `<section class="card"><h2>Budget del mese</h2>${budgets}</section>` : ''}`;
+}
+function expectedCard() {
+  const now = today(), list = live('tx').filter(t => t.d > now).sort((a, b) => a.d < b.d ? -1 : 1);
+  if (!list.length) return '';
+  const sum = k => list.filter(t => t.kind === k).reduce((s, t) => s + t.amt, 0);
+  return `<section class="card"><h2>Da incassare e da pagare</h2><p class="small mut num">Da incassare ${eur(sum('in'))} · da pagare ${eur(sum('out'))}</p>${list.map(t => `<div class="item"><div>${esc(t.note || t.cat)}<div class="small mut">${AREAS[t.area]} · entro il ${t.d.split('-').reverse().join('/')}</div></div><span class="num ${t.kind === 'in' ? 'in' : ''}">${t.kind === 'in' ? '+' : '−'}${eur2(t.amt)}</span></div>`).join('')}</section>`;
 }
 function chartData() {
   const ms = monthsBack(12), F = flows();
