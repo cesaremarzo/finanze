@@ -3,7 +3,7 @@
    Sul dispositivo e su GitHub finisce solo testo cifrato (AES-256-GCM, chiave PBKDF2). */
 const LS = { vault: 'fin.vault', dev: 'fin.device' };
 const ITER = 600000, FILE = 'data.enc';
-const LISTS = ['tx', 'bookings', 'accounts', 'recurring', 'planned'], SINGLE = ['settings', 'house'];
+const LISTS = ['tx', 'bookings', 'accounts', 'recurring', 'planned', 'crypto'], SINGLE = ['settings', 'house'];
 const AREAS = { personale: 'Personale', bnb: 'Casa vacanze', humfiverse: 'Humfiverse', cyberstand: 'Cyberstand' };
 const CATS = {
   personale: { out: ['Casa e bollette', 'Spesa', 'Trasporti', 'Salute', 'Svago', 'Abbonamenti', 'Viaggi', 'Tasse e imposte', 'Altro'], in: ['Stipendio', 'Rimborsi', 'Altro'] },
@@ -48,8 +48,8 @@ function emptyDoc() {
   return {
     v: 1,
     settings: { u: 0, ral: 0, netAnnual: 0, mensilita: 13, addizionali: 2.3, units: [], taxRates: {}, budgets: {} },
-    house: { u: 0, rate: 3.5, years: 30, ltv: 80, ratio: 30, otherDebts: 0, emergency: 6000, monthlySaving: 0, useBnb: false, catastalePct: 50, taxPct: 2, agencyPct: 3.66, fixedCosts: 4000 },
-    tx: [], bookings: [], accounts: [], recurring: [], planned: [],
+    house: { u: 0, rate: 3.5, years: 30, ltv: 80, ratio: 30, otherDebts: 0, emergency: 6000, monthlySaving: 0, useBnb: false, useCrypto: false, catastalePct: 50, taxPct: 2, agencyPct: 3.66, fixedCosts: 4000 },
+    tx: [], bookings: [], accounts: [], recurring: [], planned: [], crypto: [],
   };
 }
 function clean(raw) {
@@ -64,6 +64,7 @@ function clean(raw) {
     accounts: r => ({ ...base(r), name: str(r.name, 60), balance: num(r.balance), d: day(r.d) }),
     recurring: r => ({ ...base(r), name: str(r.name, 60), amt: Math.abs(num(r.amt)), kind: kind(r.kind), area: area(r.area), cat: str(r.cat, 40), every: [1, 2, 3, 6, 12].includes(num(r.every)) ? num(r.every) : 1 }),
     planned: r => ({ ...base(r), name: str(r.name, 80), low: num(r.low), high: num(r.high), freq: r.freq === 'anno' ? 'anno' : 'una tantum', note: str(r.note) }),
+    crypto: r => ({ ...base(r), name: str(r.name, 60), asset: r.asset === 'ETH' ? 'ETH' : 'BTC', qty: Math.abs(num(r.qty)), apy: Math.abs(num(r.apy)), dca: Math.abs(num(r.dca)), d: day(r.d) }),
   };
   for (const k of LISTS) o[k] = (Array.isArray(raw[k]) ? raw[k] : []).map(map[k]);
   return o;
@@ -140,6 +141,33 @@ async function sync() {
 }
 function setSync(t) { UI.sync = t; const el = $('#syncState'); if (el) el.textContent = t; }
 
+/* ---------- crypto ---------- */
+/* Solo prezzi pubblici: la richiesta non contiene nessun dato personale. */
+const PX = { BTC: 0, ETH: 0, t: 0 };
+try { Object.assign(PX, JSON.parse(localStorage.getItem('fin.prices') || '{}')); } catch { /* si riparte senza cache */ }
+async function fetchPrices() {
+  if (Date.now() - PX.t < 3e5 || !navigator.onLine) return;
+  try {
+    const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=eur', { cache: 'no-store' });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!(j.bitcoin?.eur > 0 && j.ethereum?.eur > 0)) return;
+    Object.assign(PX, { BTC: j.bitcoin.eur, ETH: j.ethereum.eur, t: Date.now() });
+    try { localStorage.setItem('fin.prices', JSON.stringify(PX)); } catch { /* cache facoltativa */ }
+    if (KEY && UI.view === 'home' && !document.activeElement?.matches('input,select')) render();
+  } catch { /* resta l'ultimo prezzo noto */ }
+}
+const daysSince = d => Math.max(0, Math.round((new Date(today()) - new Date(d)) / 864e5));
+/* Quantità stimata: ultimo dato inserito, più rendimento composto e acquisti giornalieri al prezzo attuale. */
+function cryptoQty(c) {
+  const n = daysSince(c.d), p = PX[c.asset];
+  return c.qty * (1 + c.apy / 100) ** (n / 365) + (p > 0 ? c.dca * n / p : 0);
+}
+const cryptoValue = c => cryptoQty(c) * PX[c.asset];
+const cryptoTotal = () => live('crypto').reduce((s, c) => s + cryptoValue(c), 0);
+const cryptoDcaMonthly = () => live('crypto').reduce((s, c) => s + c.dca, 0) * 365 / 12;
+const fmtQ = n => n.toLocaleString('it-IT', { maximumFractionDigits: 8 });
+
 /* ---------- calcoli ---------- */
 function flows() {
   /* Movimenti e prenotazioni con data futura sono previsioni, non cassa. */
@@ -193,7 +221,7 @@ function plannedOut() {
 function monthlySaving() {
   if (D.house.monthlySaving > 0) return D.house.monthlySaving;
   /* Senza spese previste il risparmio coinciderebbe con tutto lo stipendio: meglio non stimarlo. */
-  return plannedOut() > 0 ? Math.max(0, salaryMonthly() + bnbMonthlyAvg() - plannedOut()) : 0;
+  return plannedOut() > 0 ? Math.max(0, salaryMonthly() + bnbMonthlyAvg() - plannedOut() - cryptoDcaMonthly()) : 0;
 }
 /* Stima, da sostituire col cedolino. Aliquote e detrazioni 2026 per lavoro dipendente. */
 function stimaNetto(ral, addizionali) {
@@ -210,7 +238,7 @@ function houseCalc() {
   const h = D.house, income = salaryMonthly() + (h.useBnb ? Math.max(0, bnbMonthlyAvg()) : 0);
   const maxRata = Math.max(0, income * h.ratio / 100 - h.otherDebts), maxLoan = pv(maxRata, h.rate, h.years);
   const ltv = h.ltv / 100, pct = h.catastalePct / 100 * h.taxPct / 100 + h.agencyPct / 100;
-  const ceiling = ltv ? maxLoan / ltv : 0, available = Math.max(0, liquidity() - h.emergency), saving = monthlySaving();
+  const ceiling = ltv ? maxLoan / ltv : 0, available = Math.max(0, liquidity() + (h.useCrypto ? cryptoTotal() : 0) - h.emergency), saving = monthlySaving();
   const byCash = (1 - ltv + pct) > 0 ? Math.max(0, available - h.fixedCosts) / (1 - ltv + pct) : 0;
   const scen = P => {
     const loan = P * ltv, cash = P * (1 - ltv) + P * pct + h.fixedCosts, miss = Math.max(0, cash - available);
@@ -252,9 +280,19 @@ function vHome() {
   <section class="card"><h2>Ultimi 12 mesi</h2><div class="legend"><span><i style="background:var(--s1)"></i>Entrate</span><span><i style="background:var(--s2)"></i>Uscite</span></div><div class="chart" id="chart"></div>${chartTable()}</section>
   <section class="card"><h2>Anno ${y} per attività</h2><div class="tw"><table><thead><tr><th>Attività</th><th class="r">Entrate</th><th class="r">Uscite</th><th class="r">Saldo</th></tr></thead><tbody>${areas}</tbody></table></div>
   <p class="small mut" style="margin-top:10px">Da accantonare per la casa vacanze nel ${y}: ${eur(Math.max(0, b.tot.tax - b.tot.withheld))} di cedolare stimata al netto delle ritenute dei portali e ${eur(b.tot.cityTax)} di imposta di soggiorno.</p></section>
+  ${cryptoCard()}
   ${expectedCard()}
   <section class="card"><h2>Comprare casa</h2><p class="num" style="font-size:1.25rem;font-weight:650;margin-bottom:2px">${eur(hc.ceiling)}</p><p class="mut small">prezzo massimo che il reddito sostiene con le impostazioni attuali. Con la liquidità di oggi arrivi a ${eur(hc.today)}.</p><button class="btn alt sm" data-act="go" data-v="house">Apri il simulatore</button></section>
   ${budgets ? `<section class="card"><h2>Budget del mese</h2>${budgets}</section>` : ''}`;
+}
+function cryptoCard() {
+  const list = live('crypto'); if (!list.length) return '';
+  const hasPx = PX.t > 0, money = v => hasPx ? eur(v) : 'n.d.';
+  const rows = list.map(c => `<tr><td>${esc(c.name)}</td><td class="r num">${fmtQ(cryptoQty(c))} ${c.asset}</td><td class="r num">${money(cryptoValue(c))}</td><td class="r num">${c.apy ? String(c.apy).replace('.', ',') + '%' : '—'}</td><td class="r num">${c.dca ? eur2(c.dca) + '/g' : '—'}</td></tr>`).join('');
+  const when = hasPx ? new Date(PX.t).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+  return `<section class="card"><h2>Crypto</h2><div class="tw"><table><thead><tr><th>Posizione</th><th class="r">Quantità stimata</th><th class="r">Valore</th><th class="r">APY</th><th class="r">Acquisto</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <p class="small mut num" style="margin-top:10px">Totale crypto ${money(cryptoTotal())} · patrimonio con i conti ${hasPx ? eur(cryptoTotal() + liquidity()) : 'n.d.'}${hasPx ? ` · BTC ${eur(PX.BTC)}, ETH ${eur(PX.ETH)}, aggiornati il ${when}` : ' · prezzi non disponibili'}.</p>
+  <p class="small mut">La quantità parte dall’ultimo dato inserito e aggiunge rendimento e acquisti al prezzo di oggi: è una stima, correggila ogni tanto col dato reale in Impostazioni.</p></section>`;
 }
 function expectedCard() {
   const now = today(), list = live('tx').filter(t => t.d > now).sort((a, b) => a.d < b.d ? -1 : 1);
@@ -344,6 +382,7 @@ function vHouse() {
   return `<div id="houseOut">${houseOut()}</div>
   <section class="card"><h2>Ipotesi</h2><div class="f2">${field('rate', 'Tasso annuo (%)', .05)}${field('years', 'Durata (anni)')}${field('ltv', 'Quota finanziata (%)')}${field('ratio', 'Rata massima su reddito (%)')}${field('otherDebts', 'Altre rate al mese (€)')}${field('emergency', 'Fondo emergenza da non toccare (€)', 100)}${field('monthlySaving', 'Risparmio mensile (0 = calcolato) (€)', 10)}${field('catastalePct', 'Valore catastale su prezzo (%)')}${field('taxPct', 'Imposta di registro (%)', .5)}${field('agencyPct', 'Agenzia, IVA inclusa (%)', .01)}${field('fixedCosts', 'Notaio, perizia, istruttoria (€)', 100)}</div>
   <label><input type="checkbox" data-house-check="useBnb" ${h.useBnb ? 'checked' : ''}>Conta anche il reddito della casa vacanze</label>
+  <label><input type="checkbox" data-house-check="useCrypto" ${h.useCrypto ? 'checked' : ''}>Conta le crypto come disponibili per l’acquisto</label>
   <p class="note">La banca di solito conta i redditi extra solo se dichiarati e stabili da almeno due anni, quindi di base il calcolo usa solo lo stipendio. Tasso e imposte sono punti di partenza da aggiornare con un preventivo reale. Sotto i 36 anni verifica il Fondo Garanzia Prima Casa, che può alzare la quota finanziata.</p></section>`;
 }
 function houseOut() {
@@ -357,6 +396,8 @@ function vSet() {
   return `<section class="card"><h2>Stipendio</h2><form data-form="salary"><div class="f2"><label>RAL (€)<input name="ral" type="number" step="1" min="0" value="${s.ral}"></label><label>Addizionali stimate (%)<input name="addizionali" type="number" step="0.1" min="0" value="${s.addizionali}"></label></div><label>Netto annuo (€)<input name="netAnnual" type="number" step="1" min="0" value="${s.netAnnual}"></label><div class="row"><button class="btn">Salva</button><button type="button" class="btn alt" data-act="estimate">Stima il netto dalla RAL</button></div></form><p class="small mut" style="margin-top:10px">La stima è approssimativa: appena puoi, usa il netto reale del cedolino o della CU.</p></section>
   <section class="card"><h2>Conti</h2>${acc.map(a => `<div class="item"><div>${esc(a.name)}<div class="small mut">aggiornato ${a.d.split('-').reverse().join('/')}</div></div><div class="row" style="flex-wrap:nowrap"><input style="width:120px;margin:0" type="number" step="0.01" value="${a.balance}" aria-label="Saldo ${esc(a.name)}" data-account="${a.id}"><button class="x" aria-label="Elimina ${esc(a.name)}" data-act="del" data-k="accounts" data-id="${a.id}">×</button></div></div>`).join('')}
   <form data-form="acc" style="margin-top:10px"><div class="f2"><label>Nuovo conto<input name="name" required maxlength="60"></label><label>Saldo (€)<input name="balance" type="number" step="0.01" required></label></div><button class="btn alt">Aggiungi</button></form></section>
+  <section class="card"><h2>Crypto</h2>${live('crypto').map(c => `<div style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="row" style="justify-content:space-between"><b>${esc(c.name)}</b><button class="x" aria-label="Elimina ${esc(c.name)}" data-act="del" data-k="crypto" data-id="${c.id}">×</button></div><div class="f2"><label>Quantità ${c.asset}<input type="number" step="any" min="0" value="${+cryptoQty(c).toFixed(8)}" data-crypto="${c.id}" data-field="qty"></label><label>Acquisto al giorno (€)<input type="number" step="0.01" min="0" value="${c.dca}" data-crypto="${c.id}" data-field="dca"></label><label>Rendimento annuo (%)<input type="number" step="0.01" min="0" value="${c.apy}" data-crypto="${c.id}" data-field="apy"></label></div><p class="small mut" style="margin:0">Dato reale inserito il ${c.d.split('-').reverse().join('/')}</p></div>`).join('')}
+  <details><summary>Aggiungi posizione</summary><form data-form="crypto"><div class="f2"><label>Nome<input name="name" required maxlength="60"></label><label>Moneta<select name="asset">${opts(['BTC', 'ETH'])}</select></label><label>Quantità<input name="qty" type="number" step="any" min="0" required></label><label>Acquisto al giorno (€)<input name="dca" type="number" step="0.01" min="0" value="0"></label><label>Rendimento annuo (%)<input name="apy" type="number" step="0.01" min="0" value="0"></label></div><button class="btn alt">Aggiungi</button></form></details></section>
   <section class="card"><h2>Budget mensili personali</h2><div class="f2">${CATS.personale.out.map(c => `<label>${esc(c)}<input type="number" step="10" min="0" value="${num(s.budgets[c])}" data-budget="${esc(c)}"></label>`).join('')}</div></section>
   <section class="card"><h2>Casa vacanze</h2><form data-form="units"><label>Appartamenti, separati da virgola<input name="units" value="${esc(s.units.join(', '))}"></label><button class="btn alt">Salva</button></form><div class="f2" style="margin-top:12px">${s.units.map(u => `<label>Cedolare ${esc(u)} (%)<input type="number" step="1" min="0" value="${num(s.taxRates[u])}" data-tax="${esc(u)}"></label>`).join('')}</div></section>
   <section class="card"><h2>Sincronizzazione</h2>${DEV ? `<p class="small">Collegato a <b>${esc(DEV.repo)}</b>.</p><div class="row"><button class="btn alt" data-act="sync">Sincronizza ora</button><button class="btn alt" data-act="unlink">Scollega</button></div>` : `<form data-form="link"><label>Repository privato (utente/nome)<input name="repo" required autocomplete="off" spellcheck="false"></label><label>Token GitHub<input name="token" type="password" required autocomplete="off"></label><button class="btn alt">Collega</button></form>`}</section>
@@ -391,6 +432,7 @@ const FORMS = {
     upsert('bookings', { id: uid(), arrive: f.arrive.value, depart: f.depart.value, nights: n, unit: f.unit.value, channel: f.channel.value, gross, comm, net: gross - comm, cityTax: num(f.cityTax.value), note: f.note.value.trim() }); toast('Prenotazione aggiunta'); UI.year = +f.depart.value.slice(0, 4); render();
   },
   plan: f => { upsert('planned', { id: uid(), name: f.name.value.trim(), low: num(f.low.value), high: num(f.high.value), freq: f.freq.value, note: f.note.value.trim() }); render(); },
+  crypto: f => { upsert('crypto', { id: uid(), name: f.name.value.trim(), asset: f.asset.value, qty: num(f.qty.value), apy: num(f.apy.value), dca: num(f.dca.value), d: today() }); render(); },
   acc: f => { upsert('accounts', { id: uid(), name: f.name.value.trim(), balance: num(f.balance.value), d: today() }); render(); },
   salary: f => { Object.assign(D.settings, { ral: num(f.ral.value), addizionali: num(f.addizionali.value), netAnnual: num(f.netAnnual.value), u: Date.now() }); changed(); toast('Salvato'); },
   units: f => { D.settings.units = f.units.value.split(',').map(s => s.trim()).filter(Boolean).slice(0, 20); D.settings.u = Date.now(); changed(); render(); },
@@ -408,6 +450,12 @@ document.addEventListener('change', async e => {
   if (d.budget) { D.settings.budgets[d.budget] = num(t.value); D.settings.u = Date.now(); changed(); }
   if (d.tax) { D.settings.taxRates[d.tax] = num(t.value); D.settings.u = Date.now(); changed(); }
   if (d.account) { const a = D.accounts.find(x => x.id === d.account); upsert('accounts', { ...a, balance: num(t.value), d: today() }); toast('Saldo aggiornato'); }
+  if (d.crypto) {
+    const c = D.crypto.find(x => x.id === d.crypto), nc = { ...c, d: today() };
+    /* Cambiando APY o acquisto si fissa prima la stima, così il nuovo valore vale solo da oggi. */
+    if (d.field === 'qty') nc.qty = num(t.value); else { nc.qty = +cryptoQty(c).toFixed(8); nc[d.field] = num(t.value); }
+    upsert('crypto', nc); render(); toast('Aggiornato');
+  }
   if (d.file === 'json' && t.files[0]) await importJSON(t.files[0]);
   if (d.file === 'csv' && t.files[0]) await importCSV(t.files[0]);
 });
@@ -477,7 +525,7 @@ function lockView(msg = '') {
   <form class="card" id="create"><h2>Inizia da zero</h2><label>Password, almeno 12 caratteri<input id="pw1" type="password" minlength="12" required autocomplete="new-password"></label><label>Ripeti la password<input id="pw2" type="password" required autocomplete="new-password"></label><div class="err">${esc(msg)}</div><button class="btn" style="width:100%">Crea</button></form>
   <form class="card" id="join"><h2>Collega questo dispositivo</h2><label>Repository privato (utente/nome)<input id="repo" required autocomplete="off" spellcheck="false"></label><label>Token GitHub<input id="tok" type="password" required autocomplete="off"></label><label>Password<input id="pw3" type="password" required autocomplete="current-password"></label><button class="btn alt" style="width:100%">Collega</button></form>`}</main>`;
 }
-function enter() { render(); if (DEV) sync(); armLock(); }
+function enter() { render(); if (DEV) sync(); armLock(); fetchPrices(); setInterval(fetchPrices, 3e5); }
 const onLock = {
   async unlock(f) {
     const v = JSON.parse(localStorage.getItem(LS.vault)); busy(f);
