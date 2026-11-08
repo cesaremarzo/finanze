@@ -8,7 +8,7 @@ const AREAS = { personale: 'Personale', bnb: 'Casa vacanze', humfiverse: 'Humfiv
 const CATS = {
   personale: { out: ['Casa e bollette', 'Spesa', 'Trasporti', 'Salute', 'Svago', 'Abbonamenti', 'Viaggi', 'Tasse e imposte', 'Altro'], in: ['Stipendio', 'Rimborsi', 'Altro'] },
   cyberstand: { out: ['Viaggi', 'Software', 'Altro'], in: ['Compenso', 'Altro'] },
-  bnb: { out: ['Pulizie', 'Lavanderia', 'Utenze', 'Manutenzione', 'Forniture', 'Arredo', 'Tasse e imposte', 'Ritenute portali', 'Commercialista', 'Altro'], in: ['Affitto diretto', 'Altro'] },
+  bnb: { out: ['Pulizie', 'Lavanderia', 'Utenze', 'Manutenzione', 'Forniture', 'Arredo', 'Tasse e imposte', 'Ritenute portali', 'Acconto cedolare', 'Saldo cedolare', 'Commercialista', 'Altro'], in: ['Affitto diretto', 'Altro'] },
   humfiverse: { out: ['Costituzione società', 'Legale', 'Contabilità', 'Hosting e software', 'Audit', 'Marketing', 'Viaggi', 'Altro'], in: ['Commissioni piattaforma', 'Finanziamenti', 'Altro'] },
 };
 const $ = (s, r = document) => r.querySelector(s);
@@ -184,6 +184,8 @@ function monthsBack(n) {
 const mLabel = m => new Date(+m.slice(0, 4), +m.slice(5) - 1, 1).toLocaleDateString('it-IT', { month: 'short' });
 const liquidity = () => live('accounts').reduce((s, a) => s + a.balance, 0);
 const monthlyEq = r => r.amt / r.every;
+/* Cedolare versata con F24: l'acconto vale per l'anno del pagamento, il saldo per l'anno prima. */
+const CEDOLARE = new Map([['Acconto cedolare', 0], ['Saldo cedolare', 1]]);
 function bnbYear(y) {
   const units = {}; const blank = () => ({ gross: 0, comm: 0, net: 0, nights: 0, n: 0, tax: 0, costs: 0, cityTax: 0 });
   for (const b of live('bookings')) {
@@ -192,10 +194,15 @@ function bnbYear(y) {
     u.gross += b.gross; u.comm += b.comm; u.net += b.net; u.nights += b.nights; u.n++; u.cityTax += b.cityTax;
     u.tax += b.gross * num(D.settings.taxRates[b.unit]) / 100;
   }
-  const common = blank(); let otherIn = 0, withheld = 0;
+  const common = blank(); let otherIn = 0, withheld = 0, f24Paid = 0, f24Due = 0, closed = false;
   const now = today(); let futureNet = 0, futureN = 0;
   for (const b of live('bookings')) if (b.depart.startsWith(y) && b.depart > now) { futureNet += b.net; futureN++; }
   for (const t of live('tx')) {
+    if (t.area === 'bnb' && CEDOLARE.has(t.cat)) {
+      if (+t.d.slice(0, 4) - CEDOLARE.get(t.cat) !== +y) continue;
+      if (t.d > now) f24Due += t.amt; else { f24Paid += t.amt; if (t.cat === 'Saldo cedolare') closed = true; }
+      continue;
+    }
     if (t.area !== 'bnb' || !t.d.startsWith(y)) continue;
     if (t.kind === 'in') { otherIn += t.amt; continue; }
     /* La ritenuta è un acconto della cedolare, non un costo in più. */
@@ -203,7 +210,8 @@ function bnbYear(y) {
     const u = t.unit ? (units[t.unit] ||= blank()) : common; u.costs += t.amt;
   }
   const sum = f => Object.values(units).reduce((s, u) => s + u[f], 0);
-  const tot = { gross: sum('gross'), comm: sum('comm'), net: sum('net'), nights: sum('nights'), n: sum('n'), tax: sum('tax'), cityTax: sum('cityTax'), costs: sum('costs') + common.costs, otherIn, withheld, futureNet, futureN };
+  const tot = { gross: sum('gross'), comm: sum('comm'), net: sum('net'), nights: sum('nights'), n: sum('n'), tax: sum('tax'), cityTax: sum('cityTax'), costs: sum('costs') + common.costs, otherIn, withheld, f24Paid, f24Due, closed, futureNet, futureN };
+  tot.toPay = closed ? 0 : Math.max(0, tot.tax - withheld - f24Paid);
   tot.result = tot.net + otherIn - tot.costs - tot.tax;
   return { units, common, tot };
 }
@@ -279,7 +287,7 @@ function vHome() {
   return `${setup}<div class="grid">${kpi(live('crypto').length ? `Attivo totale: conti ${eur(liquidity())} + crypto ${PX.t ? eur(cryptoTotal()) : 'n.d.'}` : 'Liquidità sui conti', eur(liquidity() + (PX.t ? cryptoTotal() : 0)))}${kpi('Entrate del mese', eur(inM))}${kpi('Uscite del mese', eur(outM))}${kpi('Saldo del mese', eur(inM - outM))}</div>
   <section class="card"><h2>Ultimi 12 mesi</h2><div class="legend"><span><i style="background:var(--s1)"></i>Entrate</span><span><i style="background:var(--s2)"></i>Uscite</span></div><div class="chart" id="chart"></div>${chartTable()}</section>
   <section class="card"><h2>Anno ${y} per attività</h2><div class="tw"><table><thead><tr><th>Attività</th><th class="r">Entrate</th><th class="r">Uscite</th><th class="r">Saldo</th></tr></thead><tbody>${areas}</tbody></table></div>
-  <p class="small mut" style="margin-top:10px">Da accantonare per la casa vacanze nel ${y}: ${eur(Math.max(0, b.tot.tax - b.tot.withheld))} di cedolare stimata al netto delle ritenute dei portali e ${eur(b.tot.cityTax)} di imposta di soggiorno.</p></section>
+  <p class="small mut" style="margin-top:10px">Da accantonare per la casa vacanze nel ${y}: ${eur(b.tot.toPay)} di cedolare stimata al netto delle ritenute dei portali e degli F24 già versati${b.tot.f24Due ? ` (compresi ${eur(b.tot.f24Due)} di acconto ancora da versare)` : ''} e ${eur(b.tot.cityTax)} di imposta di soggiorno.</p></section>
   ${cryptoCard()}
   ${expectedCard()}
   <section class="card"><h2>Comprare casa</h2><p class="num" style="font-size:1.25rem;font-weight:650;margin-bottom:2px">${eur(hc.ceiling)}</p><p class="mut small">prezzo massimo che il reddito sostiene con le impostazioni attuali. Con la liquidità di oggi arrivi a ${eur(hc.today)}.</p><button class="btn alt sm" data-act="go" data-v="house">Apri il simulatore</button></section>
@@ -361,7 +369,7 @@ function vBnb() {
   return `<div class="card"><label style="margin:0">Anno<select data-change="year">${opts(years, y)}</select></label></div>
   <div class="grid">${kpi('Incasso lordo', eur(tot.gross))}${kpi('Commissioni portali', eur(tot.comm))}${kpi('Costi di gestione', eur(tot.costs))}${kpi('Risultato dopo cedolare', eur(tot.result))}</div>
   <section class="card"><h2>Per appartamento</h2><div class="tw"><table><thead><tr><th>Alloggio</th><th class="r">Pren.</th><th class="r">Notti</th><th class="r">Lordo</th><th class="r">Commiss.</th><th class="r">Netto</th><th class="r">Costi</th><th class="r">Cedolare</th><th class="r">Risultato</th></tr></thead><tbody>${uRows || '<tr><td colspan="9" class="mut">Nessun dato per quest’anno.</td></tr>'}</tbody></table></div>
-  <p class="small mut" style="margin-top:10px">Costi non assegnati a un appartamento: ${eur(common.costs)}. Altri incassi: ${eur(tot.otherIn)}. Imposta di soggiorno riscossa: ${eur(tot.cityTax)}, non è un guadagno. Cedolare stimata ${eur(tot.tax)}, di cui già trattenuta dai portali ${eur(tot.withheld)}: restano ${eur(Math.max(0, tot.tax - tot.withheld))}. È una stima con le aliquote impostate, da confermare col commercialista.${tot.futureN ? ` Il totale comprende ${tot.futureN} prenotazioni future per ${eur(tot.futureNet)} netti, non ancora incassate.` : ''}</p></section>
+  <p class="small mut" style="margin-top:10px">Costi non assegnati a un appartamento: ${eur(common.costs)}. Altri incassi: ${eur(tot.otherIn)}. Imposta di soggiorno riscossa: ${eur(tot.cityTax)}, non è un guadagno. Cedolare stimata ${eur(tot.tax)}, di cui già trattenuta dai portali ${eur(tot.withheld)} e versata con F24 ${eur(tot.f24Paid)}: ${tot.closed ? 'saldo già versato, nulla da accantonare' : `restano ${eur(tot.toPay)}${tot.f24Due ? `, compresi ${eur(tot.f24Due)} di acconto ancora da versare` : ''}`}. È una stima con le aliquote impostate, da confermare col commercialista.${tot.futureN ? ` Il totale comprende ${tot.futureN} prenotazioni future per ${eur(tot.futureNet)} netti, non ancora incassate.` : ''}</p></section>
   <section class="card"><h2>Aggiungi prenotazione</h2><form data-form="book"><div class="f2"><label>Arrivo<input name="arrive" type="date" required></label><label>Partenza<input name="depart" type="date" required></label><label>Appartamento<select name="unit" required>${unitsSel}</select></label><label>Canale<select name="channel">${opts(['Booking', 'Airbnb', 'Diretto', 'Conoscenti', 'Altro'])}</select></label></div><div class="f4"><label>Lordo (€)<input name="gross" type="number" step="0.01" min="0" required></label><label>Commissioni (€)<input name="comm" type="number" step="0.01" min="0" value="0"></label><label>Imposta soggiorno (€)<input name="cityTax" type="number" step="0.01" min="0" value="0"></label><label>Nota<input name="note" maxlength="200"></label></div><button class="btn">Aggiungi</button></form>
   <details><summary>Importa da CSV</summary><p class="small mut">Accetta il registro prenotazioni e l’export pagamenti di Booking. I nomi degli ospiti vengono scartati.</p><input type="file" accept=".csv,text/csv" data-file="csv"></details></section>
   <section class="card"><h2>Prenotazioni ${y}</h2>${list.slice(0, 200).map(b => `<div class="item"><div>${esc(b.unit)} · ${esc(b.channel)}<div class="small mut">${b.arrive === b.depart ? 'Riepilogo' : b.arrive.split('-').reverse().join('/') + ' → ' + b.depart.split('-').reverse().join('/')} · ${b.nights} notti${b.note ? ' · ' + esc(b.note) : ''}</div></div><div class="row" style="flex-wrap:nowrap"><span class="num">${eur2(b.net)}</span><button class="x" aria-label="Elimina prenotazione" data-act="del" data-k="bookings" data-id="${b.id}">×</button></div></div>`).join('') || '<p class="mut">Nessuna prenotazione.</p>'}</section>`;
@@ -469,6 +477,8 @@ async function importJSON(file) {
     else if (j.finanzeSeed === 1) {
       const inc = clean(j);
       for (const k of LISTS) inc[k].forEach(r => { if (!D[k].some(x => x.id === r.id)) D[k].push(r); });
+      /* Un seed può sostituire voci vecchie: la cancellazione si propaga con la sincronizzazione. */
+      for (const k of LISTS) for (const id of Array.isArray(j.remove?.[k]) ? j.remove[k] : []) { const r = D[k].find(x => x.id === id); if (r && !r.del) { r.del = 1; r.u = Date.now(); } }
       if (j.settings) for (const [k, v] of Object.entries(j.settings)) D.settings[k] = v;
       if (j.house) Object.assign(D.house, j.house);
       D.settings = clean(D).settings; D.settings.u = D.house.u = Date.now();
