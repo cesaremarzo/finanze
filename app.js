@@ -8,7 +8,7 @@ const AREAS = { personale: 'Personale', bnb: 'Casa vacanze', humfiverse: 'Humfiv
 const CATS = {
   personale: { out: ['Casa e bollette', 'Spesa', 'Trasporti', 'Salute', 'Svago', 'Abbonamenti', 'Viaggi', 'Tasse e imposte', 'Altro'], in: ['Stipendio', 'Rimborsi', 'Altro'] },
   cyberstand: { out: ['Viaggi', 'Software', 'Altro'], in: ['Compenso', 'Altro'] },
-  bnb: { out: ['Pulizie', 'Lavanderia', 'Utenze', 'Manutenzione', 'Forniture', 'Arredo', 'Tasse e imposte', 'Ritenute portali', 'Acconto cedolare', 'Saldo cedolare', 'Commercialista', 'Altro'], in: ['Affitto diretto', 'Altro'] },
+  bnb: { out: ['Pulizie', 'Lavanderia', 'Utenze', 'Manutenzione', 'Ristrutturazione', 'Forniture', 'Arredo', 'Tasse e imposte', 'Ritenute portali', 'Acconto cedolare', 'Saldo cedolare', 'Commercialista', 'Altro'], in: ['Affitto diretto', 'Altro'] },
   humfiverse: { out: ['Costituzione società', 'Legale', 'Contabilità', 'Hosting e software', 'Audit', 'Marketing', 'Viaggi', 'Altro'], in: ['Commissioni piattaforma', 'Finanziamenti', 'Altro'] },
 };
 const $ = (s, r = document) => r.querySelector(s);
@@ -48,7 +48,7 @@ function emptyDoc() {
   return {
     v: 1,
     settings: { u: 0, ral: 0, netAnnual: 0, mensilita: 13, addizionali: 2.3, units: [], taxRates: {}, budgets: {} },
-    house: { u: 0, rate: 3.5, years: 30, ltv: 80, ratio: 30, otherDebts: 0, emergency: 6000, monthlySaving: 0, useBnb: false, useCrypto: false, catastalePct: 50, taxPct: 2, agencyPct: 3.66, fixedCosts: 4000 },
+    house: { u: 0, rate: 3.5, years: 30, ltv: 80, ratio: 30, otherDebts: 0, emergency: 6000, monthlySaving: 0, useBnb: false, useCrypto: false, catastalePct: 50, taxPct: 2, agencyPct: 3.66, fixedCosts: 4000, avgSpend: 0, goalPrice: 300000, goalYear: 2028 },
     tx: [], bookings: [], accounts: [], recurring: [], planned: [], crypto: [],
   };
 }
@@ -59,7 +59,7 @@ function clean(raw) {
   const base = r => ({ id: str(r.id || uid(), 80), u: num(r.u), ...(r.del ? { del: 1 } : {}) });
   const area = a => AREAS[a] ? a : 'personale', kind = k => k === 'in' ? 'in' : 'out', day = d => isDate(d) ? d : today();
   const map = {
-    tx: r => ({ ...base(r), d: day(r.d), amt: Math.abs(num(r.amt)), kind: kind(r.kind), area: area(r.area), cat: str(r.cat, 40), unit: str(r.unit, 40), note: str(r.note) }),
+    tx: r => ({ ...base(r), d: day(r.d), amt: Math.abs(num(r.amt)), kind: kind(r.kind), area: area(r.area), cat: str(r.cat, 40), unit: str(r.unit, 40), note: str(r.note), ...(r.acct ? { acct: str(r.acct, 80) } : {}) }),
     bookings: r => ({ ...base(r), arrive: day(r.arrive), depart: day(r.depart), nights: num(r.nights), unit: str(r.unit, 40), channel: str(r.channel, 30), gross: num(r.gross), comm: num(r.comm), net: num(r.net), cityTax: num(r.cityTax), note: str(r.note) }),
     accounts: r => ({ ...base(r), name: str(r.name, 60), balance: num(r.balance), d: day(r.d) }),
     recurring: r => ({ ...base(r), name: str(r.name, 60), amt: Math.abs(num(r.amt)), kind: kind(r.kind), area: area(r.area), cat: str(r.cat, 40), every: [1, 2, 3, 6, 12].includes(num(r.every)) ? num(r.every) : 1 }),
@@ -92,10 +92,17 @@ function upsert(k, rec) {
   if (i >= 0) D[k][i] = rec; else D[k].push(rec);
   changed();
 }
+/* Applica (sign 1) o annulla (sign -1) l'effetto di un movimento sul saldo del conto scelto. */
+function txBalance(t, sign) {
+  const a = t.acct && D.accounts.find(x => x.id === t.acct && !x.del); if (!a) return null;
+  a.balance = Math.round((a.balance + sign * (t.kind === 'in' ? t.amt : -t.amt)) * 100) / 100; a.d = today(); a.u = Date.now();
+  return a;
+}
 function remove(k, id) {
   const r = D[k].find(x => x.id === id); if (!r) return;
-  const before = { ...r }; r.del = 1; r.u = Date.now(); changed(); render();
-  toast('Eliminato', 'Annulla', () => { Object.assign(r, before); delete r.del; r.u = Date.now(); changed(); render(); });
+  const before = { ...r }; if (k === 'tx') txBalance(r, -1);
+  r.del = 1; r.u = Date.now(); changed(); render();
+  toast('Eliminato', 'Annulla', () => { Object.assign(r, before); delete r.del; r.u = Date.now(); if (k === 'tx') txBalance(r, 1); changed(); render(); });
 }
 
 /* ---------- sincronizzazione su repository privato ---------- */
@@ -217,11 +224,18 @@ function bnbYear(y) {
 }
 function bnbMonthlyAvg() {
   const ms = new Set(monthsBack(12)); let s = 0;
-  for (const f of flows()) if (f.area === 'bnb' && ms.has(f.d.slice(0, 7))) s += f.kind === 'in' ? f.amt : -f.amt;
+  for (const f of flows()) if (f.area === 'bnb' && f.cat !== 'Ristrutturazione' && ms.has(f.d.slice(0, 7))) s += f.kind === 'in' ? f.amt : -f.amt;
   return s / 12;
 }
 function salaryMonthly() { return D.settings.netAnnual / 12; }
+function taxMonthlyAvg() {
+  const ms = new Set(monthsBack(12)); let s = 0;
+  for (const f of flows()) if (f.area === 'personale' && f.cat === 'Tasse e imposte' && f.kind === 'out' && ms.has(f.d.slice(0, 7))) s += f.amt;
+  return s / 12;
+}
 function plannedOut() {
+  /* La spesa media, se indicata, comprende già ricorrenti e budget: non si sommano. */
+  if (num(D.house.avgSpend) > 0) return num(D.house.avgSpend);
   /* Le spese di casa vacanze sono già nella media netta del B&B. */
   return live('recurring').filter(r => r.kind === 'out' && r.area === 'personale').reduce((s, r) => s + monthlyEq(r), 0) +
     Object.values(D.settings.budgets).reduce((s, v) => s + num(v), 0);
@@ -229,7 +243,7 @@ function plannedOut() {
 function monthlySaving() {
   if (D.house.monthlySaving > 0) return D.house.monthlySaving;
   /* Senza spese previste il risparmio coinciderebbe con tutto lo stipendio: meglio non stimarlo. */
-  return plannedOut() > 0 ? Math.max(0, salaryMonthly() + bnbMonthlyAvg() - plannedOut() - cryptoDcaMonthly()) : 0;
+  return plannedOut() > 0 ? Math.max(0, salaryMonthly() + bnbMonthlyAvg() - plannedOut() - cryptoDcaMonthly() - taxMonthlyAvg()) : 0;
 }
 /* Stima, da sostituire col cedolino. Aliquote e detrazioni 2026 per lavoro dipendente. */
 function stimaNetto(ral, addizionali) {
@@ -342,6 +356,7 @@ function vAdd() {
   <div class="seg"><button type="button" data-act="kind" data-k="out" aria-pressed="${kind === 'out'}">Uscita</button><button type="button" data-act="kind" data-k="in" aria-pressed="${kind === 'in'}">Entrata</button></div>
   <label>Importo (€)<input name="amt" type="number" inputmode="decimal" step="0.01" min="0.01" required autofocus></label>
   <div class="f2"><label>Attività<select name="area" data-change="area">${areaOpts(area)}</select></label><label>Categoria<select name="cat">${opts(cats)}</select></label></div>
+  <label>Conto da aggiornare<select name="acct">${opts([['', 'Nessuno'], ...live('accounts').map(a => [a.id, a.name])], UI.acct || '')}</select></label>
   <div class="f2"><label>Data<input name="d" type="date" value="${today()}" required></label>${area === 'bnb' ? `<label>Appartamento<select name="unit">${opts([['', 'Tutti / comune'], ...D.settings.units])}</select></label>` : '<span></span>'}</div>
   <label>Nota<input name="note" maxlength="200"></label>
   <button class="btn" style="width:100%">Salva</button></form>
@@ -388,15 +403,17 @@ function vHf() {
 function vHouse() {
   const h = D.house, field = (k, l, step = 1) => `<label>${l}<input type="number" step="${step}" min="0" value="${h[k]}" data-house="${k}"></label>`;
   return `<div id="houseOut">${houseOut()}</div>
-  <section class="card"><h2>Ipotesi</h2><div class="f2">${field('rate', 'Tasso annuo (%)', .05)}${field('years', 'Durata (anni)')}${field('ltv', 'Quota finanziata (%)')}${field('ratio', 'Rata massima su reddito (%)')}${field('otherDebts', 'Altre rate al mese (€)')}${field('emergency', 'Fondo emergenza da non toccare (€)', 100)}${field('monthlySaving', 'Risparmio mensile (0 = calcolato) (€)', 10)}${field('catastalePct', 'Valore catastale su prezzo (%)')}${field('taxPct', 'Imposta di registro (%)', .5)}${field('agencyPct', 'Agenzia, IVA inclusa (%)', .01)}${field('fixedCosts', 'Notaio, perizia, istruttoria (€)', 100)}</div>
+  <section class="card"><h2>Ipotesi</h2><div class="f2">${field('rate', 'Tasso annuo (%)', .05)}${field('years', 'Durata (anni)')}${field('ltv', 'Quota finanziata (%)')}${field('ratio', 'Rata massima su reddito (%)')}${field('otherDebts', 'Altre rate al mese (€)')}${field('emergency', 'Fondo emergenza da non toccare (€)', 100)}${field('monthlySaving', 'Risparmio mensile (0 = calcolato) (€)', 10)}${field('avgSpend', 'Spesa media mensile, solo per i calcoli (€)', 10)}${field('goalPrice', 'Prezzo obiettivo (€)', 1000)}${field('goalYear', 'Obiettivo entro dicembre (anno)')}${field('catastalePct', 'Valore catastale su prezzo (%)')}${field('taxPct', 'Imposta di registro (%)', .5)}${field('agencyPct', 'Agenzia, IVA inclusa (%)', .01)}${field('fixedCosts', 'Notaio, perizia, istruttoria (€)', 100)}</div>
   <label><input type="checkbox" data-house-check="useBnb" ${h.useBnb ? 'checked' : ''}>Conta anche il reddito della casa vacanze</label>
   <label><input type="checkbox" data-house-check="useCrypto" ${h.useCrypto ? 'checked' : ''}>Conta le crypto come disponibili per l’acquisto</label>
   <p class="note">La banca di solito conta i redditi extra solo se dichiarati e stabili da almeno due anni, quindi di base il calcolo usa solo lo stipendio. Tasso e imposte sono punti di partenza da aggiornare con un preventivo reale. Sotto i 36 anni verifica il Fondo Garanzia Prima Casa, che può alzare la quota finanziata.</p></section>`;
 }
 function houseOut() {
   const c = houseCalc(), steps = [100, 130, 160, 200, 250].map(k => k * 1000);
+  const now = new Date(), g = c.scen(num(D.house.goalPrice)), gMonths = Math.max(1, (num(D.house.goalYear) - now.getFullYear()) * 12 + 11 - now.getMonth()), perMonth = g.miss / gMonths, hasSaving = c.saving > 0 || num(D.house.avgSpend) > 0 || num(D.house.monthlySaving) > 0;
   const when = s => s.months === 0 ? 'ora' : s.months === Infinity ? 'n.d.' : s.months < 24 ? s.months + ' mesi' : (s.months / 12).toFixed(1).replace('.', ',') + ' anni';
-  return `<div class="grid">${kpi('Prezzo massimo da reddito', eur(c.ceiling))}${kpi('Comprabile con la liquidità di oggi', eur(c.today))}${kpi('Rata massima', eur(c.maxRata))}${kpi(c.saving ? 'Risparmio mensile usato' : 'Risparmio mensile: inserisci budget o valore', c.saving ? eur(c.saving) : 'n.d.')}</div>
+  return `<div class="grid">${kpi('Prezzo massimo da reddito', eur(c.ceiling))}${kpi('Comprabile con la liquidità di oggi', eur(c.today))}${kpi('Rata massima', eur(c.maxRata))}${kpi(hasSaving ? 'Risparmio mensile stimato' : 'Risparmio mensile: inserisci la spesa media', hasSaving ? eur(c.saving) : 'n.d.')}</div>
+  <section class="card"><h2>Obiettivo di risparmio</h2><div class="grid">${kpi('Contanti necessari', eur(g.cash))}${kpi('Disponibili oggi', eur(c.available))}${kpi('Ti mancano', eur(g.miss))}${kpi(`Da mettere da parte al mese per ${gMonths} mesi`, eur(perMonth))}</div><p class="small mut" style="margin-top:10px">Per comprare a ${eur(g.P)} entro dicembre ${D.house.goalYear}, dopo spese e tasse. ${hasSaving ? (c.saving >= perMonth ? 'Al ritmo stimato oggi ci arrivi.' : `Al ritmo stimato oggi mancano ${eur(perMonth - c.saving)} al mese.`) : ''}${g.ok ? '' : ' Con il reddito considerato oggi questo prezzo supera il limite del mutuo.'}</p></section>
   <section class="card"><h2>Quale prezzo</h2><div class="tw"><table><thead><tr><th>Prezzo</th><th class="r">Rata</th><th>Reddito</th><th class="r">Tempo</th><th class="r">Contanti servono</th><th class="r">Ti mancano</th><th class="r">Mutuo</th><th class="r">Rata con +1%</th></tr></thead><tbody>${steps.map(c.scen).map(s => `<tr><td class="num">${eur(s.P)}</td><td class="r num">${eur(s.rata)}</td><td>${s.ok ? 'Ok' : 'Oltre limite'}</td><td class="r num">${when(s)}</td><td class="r num">${eur(s.cash)}</td><td class="r num">${eur(s.miss)}</td><td class="r num">${eur(s.loan)}</td><td class="r num">${eur(s.stress)}</td></tr>`).join('')}</tbody></table></div><p class="small mut" style="margin-top:10px">Disponibile per l’acquisto: ${eur(c.available)}, cioè liquidità meno fondo emergenza. Reddito mensile considerato: ${eur(c.income)}.</p></section>`;
 }
 function vSet() {
@@ -432,7 +449,12 @@ const A = {
 };
 document.addEventListener('click', e => { const b = e.target.closest('[data-act]'); if (b && KEY) { A[b.dataset.act]?.(b, e); } });
 const FORMS = {
-  tx: f => { upsert('tx', { id: uid(), d: f.d.value, amt: num(f.amt.value), kind: UI.kind, area: f.area.value, cat: f.cat.value, unit: f.unit?.value || '', note: f.note.value.trim() }); toast('Salvato'); render(); },
+  tx: f => {
+    UI.acct = f.acct.value;
+    /* Una spesa con data futura non è ancora uscita dal conto. */
+    const t = { id: uid(), d: f.d.value, amt: num(f.amt.value), kind: UI.kind, area: f.area.value, cat: f.cat.value, unit: f.unit?.value || '', note: f.note.value.trim(), ...(f.acct.value && f.d.value <= today() ? { acct: f.acct.value } : {}) };
+    upsert('tx', t); const a = txBalance(t, 1); toast(a ? `Salvato. Saldo ${a.name}: ${eur2(a.balance)}` : 'Salvato'); render();
+  },
   rec: f => { upsert('recurring', { id: uid(), name: f.name.value.trim(), amt: num(f.amt.value), kind: f.kind.value, area: f.area.value, cat: f.cat.value.trim() || 'Altro', every: num(f.every.value) }); render(); },
   book: f => {
     const n = Math.round((new Date(f.depart.value) - new Date(f.arrive.value)) / 864e5); if (n < 1) return toast('La partenza deve seguire l’arrivo');
